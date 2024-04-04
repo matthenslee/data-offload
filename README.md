@@ -44,7 +44,7 @@ This EC2 instance will host the snowball data offload agent.
 
 ## Setup Snowball Data Offload Agent
 ```bash
-git clone git@ssh.gitlab.aws.dev:wwps-us-dod-army-sa/snowballdataoffload.git
+git clone https://github.com/aws-samples/data-offload
 pip3 install -r requirements.txt
 ```
 
