@@ -14,18 +14,27 @@ import boto3
 from botocore.exceptions import ClientError
 
 def get_source_manifest(source):
-    source_file_dict = {}
-    local_files = os.listdir(source)
-    for file_name in local_files:
-        file_path = os.path.join(source, file_name)
-
-        # Get size and creation time of local file
-        local_size = os.path.getsize(file_path)
-        local_time = datetime.utcfromtimestamp(os.path.getctime(file_path))
-        source_file_dict[file_name] = {}
-        source_file_dict[file_name]['size'] = local_size
-        source_file_dict[file_name]['local_time'] = local_time
+    if not os.path.exists(source):
+       raise FileNotFoundError(f"Directory not found: {source}")
     
+    source_file_dict = {}
+    
+    for root, dirs, files in os.walk(source):
+        for file_name in files:
+            file_path = os.path.join(root, file_name)
+            
+            # Get relative path from source directory
+            rel_path = os.path.relpath(file_path, start=source)
+            full_path = source + '/' + rel_path
+            
+            # Get size and creation time of local file
+            local_size = os.path.getsize(file_path)
+            local_time = datetime.utcfromtimestamp(os.path.getctime(file_path))
+            
+            source_file_dict[rel_path] = {
+                'size': local_size,
+                'local_time': local_time,
+            }
     return source_file_dict
 
 def get_dest_manifest(destination):
@@ -37,7 +46,8 @@ def get_dest_manifest(destination):
             s3_files_output = subprocess.check_output(
                 ['s5cmd', '--log', 'debug', '--endpoint-url', destination["snowballs"][id]["endpoint"],
                 '--use-list-objects-v1',
-                '--profile', destination["snowballs"][0]["profile"], 'ls', f's3://{destination["snowballs"][id]["bucket"]}/'], stderr=subprocess.STDOUT).decode('utf-8')
+                '--profile', destination["snowballs"][id]["profile"], 'ls', f's3://{destination["snowballs"][id]["bucket"]}/*'], stderr=subprocess.STDOUT).decode('utf-8')
+
         except subprocess.CalledProcessError as e:
             logging.debug("s5cmd process returned error " + str(e.output))
             s3_files_output = ""
@@ -59,17 +69,19 @@ def get_dest_manifest(destination):
             s3_files_dict[name]['local_time'] = time
         
         if destination['type'] == "s3compatible":
-            break    
+            break   
     return s3_files_dict
 
-def compare_source_dest(source, destination):
+def compare_source_dest(source, destination, config):
     delta_files_dict = {}
     for file in source.keys():
+        #compare file without source dir        
+        tmpfile = file[len(config['source']):] if file.startswith(config['source']) else file
         if file not in destination.keys():
-            delta_files_dict[file] = source[file]
+            delta_files_dict[tmpfile] = source[file]
             continue
         if file in destination.keys() and source[file]['size'] != destination[file]['size']:
-            delta_files_dict[file] = source[file]
+            delta_files_dict[tmpfile] = source[file]
     return delta_files_dict
 
 def build_commands(source_path, destination, configfile, run_time):
@@ -82,8 +94,6 @@ def build_commands(source_path, destination, configfile, run_time):
         pending_command_file_name = 'logs/' + str(configfile) + '_' + run_time + '_commands_pending_' + str(destination['snowballs'][i]['name']) + '.txt'
         for file in file_split[i]:
             file_path = os.path.join(source_path, file)
-
-            #pending_commands.append(f'cp "{file_path}" s3://{destination["bucket"]}/{file_name.replace(" ","")}')
             pending_commands.append(f'cp "{file_path}" s3://{destination["snowballs"][i]["bucket"]}/{file.replace(" ","")}')
         with open(pending_command_file_name, 'w') as f:
             for line in pending_commands:
@@ -198,7 +208,7 @@ def validate_config(config):
             sys.exit()
 
 def report_status(group, source_manifest, destination_manifest, run_time, config_file, config):
-  remaining_manifest = compare_source_dest(source_manifest, destination_manifest)
+  remaining_manifest = compare_source_dest(source_manifest, destination_manifest, config)
 
   source_size=0
   #add up all file sizes
@@ -226,14 +236,19 @@ def report_status(group, source_manifest, destination_manifest, run_time, config
             status = line.split()
             errors += int(status[2])
             successes += int(status[3])
-            totaltransfers = int(status[1])
+            totaltransfers += int(status[1])
             break
           if line.startswith("Operation"):
             getnextline = True
     except:
       pass
-  #print out status bar and description
-  print_progress_bar(((source_size-remaining_size)/source_size)*100, 100, group)
+    if source_size > 0:
+      try:
+        progress = ((source_size - remaining_size) / source_size) * 100
+        print_progress_bar(progress, 100, group)
+      ## case to handle zero KB files
+      except Exception as e:
+        print(f"Error in progress bar calculation - zero KB file: {e}")
   logging.info("[" + group + "] " + str(round(source_size-remaining_size,1)) + "GB of " + str(round(source_size,1)) + "GB copied. " + str(round(remaining_size,1))  +  "GB remaining")
   logging.info(str(errors) + " out of " + str(totaltransfers) + " transfers failed")
   print("\n")
@@ -284,7 +299,7 @@ def main():
 
         #compare source and destination
         logging.info("Comparing files in directory " + config["source"] + " to files on destination group " + str(destination_groups[id]))
-        config['destinations'][group]['copylist'] = compare_source_dest(source_file_dict, dest_file_dict)
+        config['destinations'][group]['copylist'] = compare_source_dest(source_file_dict, dest_file_dict, config)
         completed_files = len(source_file_dict.keys()) - len(config['destinations'][group]['copylist'])
         logging.info(f"Found {len(config['destinations'][group]['copylist'])} pending files and {completed_files} completed files")
 
